@@ -6,6 +6,10 @@ import config
 import hmac
 import hashlib
 from urllib.parse import urlencode
+import matplotlib.pyplot as plt
+import matplotlib.dates as mdates
+from matplotlib.ticker import MaxNLocator
+import io
 
 client = openai.OpenAI(api_key=config.OPENAI_API_KEY)
 
@@ -138,6 +142,7 @@ def split_message_smart(message, max_len=4000):
         parts.append(message.strip())
     return parts
 
+
 def send_telegram_message(message):
     url = f"https://api.telegram.org/bot{config.TELEGRAM_TOKEN}/sendMessage"
     MAX_LEN = 4000
@@ -153,6 +158,17 @@ def send_telegram_message(message):
         if resp.status_code != 200:
             print("Telegram Hata:", resp.status_code, resp.text)
 
+def send_telegram_photo(image_path, caption=None):
+    url = f"https://api.telegram.org/bot{config.TELEGRAM_TOKEN}/sendPhoto"
+    with open(image_path, "rb") as img:
+        data = {"chat_id": config.TELEGRAM_CHAT_ID}
+        if caption:
+            data["caption"] = caption
+            data["parse_mode"] = "HTML"
+        resp = requests.post(url, data=data, files={"photo": img})
+        print(f"Telegram FOTO Kodu: {resp.status_code}")
+        if resp.status_code != 200:
+            print("Telegram Photo Hata:", resp.status_code, resp.text)
 def analyze_and_report():
     symbols = ["BTCUSDT", "ETHUSDT", "SOLUSDT"]  # Coin listesi (istediğiniz gibi güncelleyebilirsiniz)
     intervals = ["1h", "4h", "1d"]  # Saatlik, 4 saatlik, günlük
@@ -176,11 +192,65 @@ def analyze_and_report():
         send_telegram_message(message)
         print(message)
 
+
+def plot_ohlc_ema_rsi_macd(symbol, interval="1h", limit=20, ema_period=9):
+    # Fiyat/mum verileri
+    df = get_binance_klines(symbol=symbol, interval=interval, limit=limit)
+    df['candle_time'] = pd.to_datetime(df['timestamp'], unit='ms')
+    closes = df['close']
+
+    ema = closes.ewm(span=ema_period, adjust=False).mean()
+    # RSI
+    delta = closes.diff()
+    gain = (delta.where(delta > 0, 0)).rolling(window=14).mean()
+    loss = (-delta.where(delta < 0, 0)).rolling(window=14).mean()
+    rs = gain / loss
+    rsi = 100 - (100 / (1 + rs))
+    # MACD
+    macd_line = closes.ewm(span=12, adjust=False).mean() - closes.ewm(span=26, adjust=False).mean()
+    macd_signal = macd_line.ewm(span=9, adjust=False).mean()
+    macd_hist = macd_line - macd_signal
+
+    # Grafik çizim
+    plt.close('all')
+    fig, axs = plt.subplots(nrows=3, ncols=1, figsize=(8,7), sharex=True,
+                            gridspec_kw={'height_ratios': [2.2, 0.8, 0.8]})
+    ax1, ax2, ax3 = axs
+    # Fiyat ve EMA
+    ax1.plot(df['candle_time'], closes, label="Kapanış", color='black', lw=1.7)
+    ax1.plot(df['candle_time'], ema, label=f"EMA({ema_period})", color='orange', lw=1.2, ls='--')
+    ax1.set_title(f"{symbol} - Son {limit} mum ({interval})")
+    ax1.legend(loc='upper left')
+    ax1.grid(True, which='both', ls=':')
+
+    # RSI
+    ax2.plot(df['candle_time'], rsi, label="RSI(14)", color='purple')
+    ax2.axhline(70, ls=':', color='red', lw=1)
+    ax2.axhline(30, ls=':', color='green', lw=1)
+    ax2.set_ylabel('RSI')
+    ax2.legend(loc='lower left')
+    ax2.yaxis.set_major_locator(MaxNLocator(nbins=4))
+    ax2.grid(True, which='both', ls=':')
+
+    # MACD
+    ax3.plot(df['candle_time'], macd_line, label="MACD", color='tab:blue')
+    ax3.plot(df['candle_time'], macd_signal, label="Sinyal", color='tab:orange')
+    ax3.bar(df['candle_time'], macd_hist, label='Histogram', color='gray', width=0.04)
+    ax3.legend(loc='upper left')
+    ax3.set_ylabel('MACD')
+    ax3.grid(True, which='both', ls=':')
+    ax3.yaxis.set_major_locator(MaxNLocator(nbins=4))
+    fig.tight_layout()
+    plt.subplots_adjust(hspace=0.04)
+    img_path = f"{symbol}_grafik.png"
+    plt.savefig(img_path, dpi=165)
+    plt.close(fig)
+    return img_path
+
 def get_symbol_price(symbol="BTCUSDT"):
     url = f"https://api.binance.com/api/v3/ticker/price?symbol={symbol}"
     r = requests.get(url)
     return float(r.json()['price'])
-
 
 def pnl_percent(entryPrice, markPrice, positionAmt, positionSide):
     try:
@@ -348,6 +418,47 @@ def technical_analysis_report():
         lines.append(f"\n<b>{symbol}</b> önerisi: {analysis}")
     return "\n".join(lines)
 
+
+def send_telegram_media_group(image_paths, symbols):
+    url = f"https://api.telegram.org/bot{config.TELEGRAM_TOKEN}/sendMediaGroup"
+    media_data = []
+    files = {}
+    file_handles = []
+    for idx, img_path in enumerate(image_paths):
+        f = open(img_path, "rb")
+        files[f"photo{idx}"] = f
+        file_handles.append(f)
+        caption = f"<b>{symbols[idx]} 1h Son 20 mum | EMA+RSI+MACD</b>" if idx == 0 else ""
+        media_data.append({
+            "type": "photo",
+            "media": f"attach://photo{idx}",
+            "caption": caption,
+            "parse_mode": "HTML"
+        })
+    import json
+    data = {
+        "chat_id": config.TELEGRAM_CHAT_ID,
+        "media": json.dumps(media_data)
+    }
+    resp = requests.post(url, data=data, files=files)
+    print(f"Media group status: {resp.status_code}")
+    if resp.status_code != 200:
+        print("Telegram MediaGroup Hata:", resp.status_code, resp.text)
+    # Önce dosya objelerini kapat:
+    for f in file_handles:
+        try:
+            f.close()
+        except Exception as ex:
+            print(f"file kapatılamadı: {ex}")
+    # Sonra dosyaları sil:
+    import os
+    for fp in image_paths:
+        try:
+            os.remove(fp)
+        except Exception as ex:
+            print(f"{fp} silinemedi: {ex}")
+
+
 def report_to_telegram():
     spot, fut, fut_pos = spot_and_futures_report()
     ai = ai_futures_advice(fut_pos)
@@ -368,6 +479,29 @@ def report_to_telegram():
     send_telegram_message(msg)
     print(msg)
 
+    # Toplu coin görsellerini biriktir ve media group olarak gönder:
+    symbols = set(["BTCUSDT", "ETHUSDT", "SOLUSDT"])
+    try:
+        spot_balances = get_spot_balances()
+        symbols.update([a['asset']+"USDT" for a in spot_balances if a['asset'] != "USDT"])
+    except:
+        pass
+    try:
+        fut_pos = get_futures_position_table()
+        symbols.update([p['symbol'] for p in fut_pos])
+    except:
+        pass
+    image_paths = []
+    symbol_list = []
+    for sym in symbols:
+        try:
+            img_path = plot_ohlc_ema_rsi_macd(sym)
+            image_paths.append(img_path)
+            symbol_list.append(sym)
+        except Exception as e:
+            print(f"Görsel oluşturma hatası {sym}: {e}")
+    if image_paths:
+        send_telegram_media_group(image_paths, symbol_list)
 
 def main():
     while True:
