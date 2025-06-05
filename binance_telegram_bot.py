@@ -261,16 +261,33 @@ def spot_and_futures_report():
 
 
 def ai_futures_advice(fut_pos):
+    import html
     if not fut_pos:
         return "Herhangi bir açık pozisyon yok."
-    # Her pozisyonu özetle
-    positions_text = "\n".join([f"{p['symbol']} {p['side']} x{p['leverage']} miktar: {p['amount']} giriş: {p['entry']} son: {p['mark']}, Kar/Zarar: {p['pnl_pct']}%" for p in fut_pos])
+    positions_full = []
+    for p in fut_pos:
+        symbol = p['symbol']
+        # 1h kapanış verisi ve indikatörler
+        try:
+            df = get_binance_klines(symbol=symbol, interval='1h')
+            closes = df['close']
+            rsi = calc_rsi(closes)
+            ema = calc_ema(closes)
+            macd, macd_signal, macd_hist = calc_macd(closes)
+            boll_upper, boll_lower, boll_mid = calc_bollinger(closes)
+            ind_str = f"RSI: {rsi}, EMA: {ema}, MACD: {macd}, Sinyal: {macd_signal}, Bollinger(üst/alt/orta): {boll_upper}/{boll_lower}/{boll_mid}"
+        except Exception as e:
+            ind_str = f"indikatör HATASI: {e}"
+        positions_full.append(
+            f"{symbol} {p['side']} x{p['leverage']} miktar: {p['amount']} giriş: {p['entry']} son: {p['mark']}, Kar/Zarar: {p['pnl_pct']}%. {ind_str}"
+        )
+    positions_text = "\n".join(positions_full)
     prompt = f"""
 Aşağıda vadeli (futures) Binance hesabımdaki açık pozisyonlar verilmiştir:
 {positions_text}
 
-Lütfen, her bir pozisyon için ayrı ayrı kısa teknik değerlendirme ve TUT/SAT/ARTTIR/KAPAT önerisi ver.
-Her öneriyi ayrı satırda yanına neden yazarak ilet. Ek olarak, genel portföy riskini kısaca özetle.
+Her pozisyonun teknik indikatörlerini de dikkate alarak teknik olarak kısaca değerlendir, tut/sat/kapalı önerini belirt. En sonda ise genel risk ve yönetim önerisini yalnızca 2-3 cümleyle, tek paragraf halinde özetle.
+Kesinlikle başlık, maddeleme, paragraf veya kategori ekleme. Sadece kısa ve bütünleşik bir teknik özet ve öneri ver.
 """
     response = client.chat.completions.create(
         model="gpt-4o",
@@ -283,11 +300,12 @@ Her öneriyi ayrı satırda yanına neden yazarak ilet. Ek olarak, genel portfö
 
 
 def technical_analysis_report():
+    import html
     symbols = ["BTCUSDT", "ETHUSDT", "SOLUSDT"]
     intervals = ["1h", "4h", "1d"]
-    lines = ["📈 TEKNİK ANALİZ"]
+    lines = ["📈 TEKNİK ANALİZ (Genel öneri her coin için tek yorumdur)"]
     for symbol in symbols:
-        lines.append(f"\n<b>{symbol}</b>:")
+        per_interval_metrics = []
         for interval in intervals:
             try:
                 df = get_binance_klines(symbol=symbol, interval=interval)
@@ -297,33 +315,37 @@ def technical_analysis_report():
                 macd, macd_signal, macd_hist = calc_macd(closes)
                 boll_upper, boll_lower, boll_mid = calc_bollinger(closes)
                 closes_list = closes.tolist()
-                analysis = ai_analysis(
-                    symbol, interval, closes_list,
-                    rsi, ema,
-                    macd, macd_signal, macd_hist,
-                    boll_upper, boll_lower, boll_mid
+                per_interval_metrics.append(
+                    f"<b>{interval}</b>: Fiyat: {round(closes_list[-1],2)}, RSI: {rsi}, EMA: {ema}, MACD: {macd}, Sinyal: {macd_signal}, Bollinger(üst/alt/orta): {boll_upper}/{boll_lower}/{boll_mid}"
                 )
-                import html
-                analysis_str = analysis.strip()
-                words = analysis_str.split()
-                if len(words) > 1:
-                    main_word = words[0].upper()
-                    rest_html = html.escape(' '.join(words[1:]))
-                else:
-                    main_word = analysis_str.upper()
-                    rest_html = ""
-                if main_word == "AL":
-                    analysis_str = f"✅ <b>AL</b> {rest_html}"
-                elif main_word == "SAT":
-                    analysis_str = f"❌ <b>SAT</b> {rest_html}"
-                elif main_word == "BEKLE":
-                    analysis_str = f"🟡 <b>BEKLE</b> {rest_html}"
-                else:
-                    analysis_str = html.escape(analysis_str)
-                lines.append(f"  {interval}: {analysis_str}")
-                time.sleep(5)
             except Exception as e:
-                lines.append(f"  {interval}: HATA: {e}")
+                per_interval_metrics.append(f"{interval}: HATA: {e}")
+        # Tüm veriyi tek seferde analiz ettirelim
+        prompt = (
+            f"Aşağıda {symbol} için 1 saatlik, 4 saatlik ve günlük teknik veriler listelenmiştir:\n" +
+            "\n".join(per_interval_metrics) +
+            "\n\nYalnızca bu verileri göz önüne alarak genel piyasa trendini ve olası yönü TEK CÜMLEYLE teknik analiz uzmanı gibi özetle.\n" +
+            "Net ve baskın bir sinyal varsa büyük harfle ve emojiyle (✅ AL / ❌ SAT / 🟡 BEKLE) yaz, ardından bir iki cümle teknik kısa sebep belirt, uzatma!"
+        )
+        response = client.chat.completions.create(
+            model="gpt-4o",
+            messages=[
+                {"role": "system", "content": "Sen bir kripto para teknik analiz uzmanısın."},
+                {"role": "user", "content": prompt}
+            ]
+        )
+        analysis = response.choices[0].message.content.strip()
+        analysis = html.escape(analysis)  # Emniyet için escape
+        # En baştaki emoji ve öneriyi özel yapıyoruz:
+        # Kalıpları bulup <b>...</b> ile güçlendir
+        if analysis.upper().startswith("AL"):
+            analysis = f"✅ <b>AL</b> {analysis[2:].strip()}"
+        elif analysis.upper().startswith("SAT"):
+            analysis = f"❌ <b>SAT</b> {analysis[2:].strip()}"
+        elif analysis.upper().startswith("BEKLE"):
+            analysis = f"🟡 <b>BEKLE</b> {analysis[4:].strip()}"
+        # Coin başlığı + analiz satırı
+        lines.append(f"\n<b>{symbol}</b> önerisi: {analysis}")
     return "\n".join(lines)
 
 def report_to_telegram():
