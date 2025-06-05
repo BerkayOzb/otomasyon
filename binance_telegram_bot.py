@@ -193,12 +193,18 @@ def analyze_and_report():
         print(message)
 
 
+import matplotlib.dates as mdates
+from matplotlib.ticker import MaxNLocator
+from mplfinance.original_flavor import candlestick_ohlc
+
 def plot_ohlc_ema_rsi_macd(symbol, interval="1h", limit=20, ema_period=9):
-    # Fiyat/mum verileri
     df = get_binance_klines(symbol=symbol, interval=interval, limit=limit)
     df['candle_time'] = pd.to_datetime(df['timestamp'], unit='ms')
+    df['num_time'] = mdates.date2num(df['candle_time'])
     closes = df['close']
-
+    opens = df['open']
+    highs = df['high']
+    lows = df['low']
     ema = closes.ewm(span=ema_period, adjust=False).mean()
     # RSI
     delta = closes.diff()
@@ -211,35 +217,37 @@ def plot_ohlc_ema_rsi_macd(symbol, interval="1h", limit=20, ema_period=9):
     macd_signal = macd_line.ewm(span=9, adjust=False).mean()
     macd_hist = macd_line - macd_signal
 
-    # Grafik çizim
+    # Mum datası
+    ohlc = list(zip(df['num_time'], opens, highs, lows, closes))
+
     plt.close('all')
     fig, axs = plt.subplots(nrows=3, ncols=1, figsize=(8,7), sharex=True,
                             gridspec_kw={'height_ratios': [2.2, 0.8, 0.8]})
     ax1, ax2, ax3 = axs
-    # Fiyat ve EMA
-    ax1.plot(df['candle_time'], closes, label="Kapanış", color='black', lw=1.7)
-    ax1.plot(df['candle_time'], ema, label=f"EMA({ema_period})", color='orange', lw=1.2, ls='--')
-    ax1.set_title(f"{symbol} - Son {limit} mum ({interval})")
-    ax1.legend(loc='upper left')
-    ax1.grid(True, which='both', ls=':')
-
-    # RSI
-    ax2.plot(df['candle_time'], rsi, label="RSI(14)", color='purple')
+    # Candlestick (Mum) grafiği çiz
+    candlestick_ohlc(ax1, ohlc, width=0.04, colorup='g', colordown='r', alpha=0.9)
+    ax1.plot(df['num_time'], ema, label=f"EMA({ema_period})", color='orange', lw=1.3, ls='--')
+    ax1.set_title(f"{symbol} - Son {limit} mum ({interval})", fontsize=13)
+    ax1.legend(loc='upper left', fontsize=9)
+    ax1.grid(True, which='both', ls=':', alpha=0.35)
+    ax1.set_ylabel('Fiyat')
+    ax1.xaxis.set_major_formatter(mdates.DateFormatter('%m-%d %H'))
+    # RSI Alt panel
+    ax2.plot(df['num_time'], rsi, label="RSI(14)", color='purple')
     ax2.axhline(70, ls=':', color='red', lw=1)
     ax2.axhline(30, ls=':', color='green', lw=1)
     ax2.set_ylabel('RSI')
-    ax2.legend(loc='lower left')
+    ax2.legend(loc='lower left', fontsize=8)
     ax2.yaxis.set_major_locator(MaxNLocator(nbins=4))
-    ax2.grid(True, which='both', ls=':')
-
-    # MACD
-    ax3.plot(df['candle_time'], macd_line, label="MACD", color='tab:blue')
-    ax3.plot(df['candle_time'], macd_signal, label="Sinyal", color='tab:orange')
-    ax3.bar(df['candle_time'], macd_hist, label='Histogram', color='gray', width=0.04)
-    ax3.legend(loc='upper left')
+    ax2.grid(True, which='both', ls=':', alpha=0.38)
+    # MACD Alt panel
+    ax3.plot(df['num_time'], macd_line, label="MACD", color='tab:blue')
+    ax3.plot(df['num_time'], macd_signal, label="Sinyal", color='tab:orange')
+    ax3.bar(df['num_time'], macd_hist, label='Histogram', color='gray', width=0.04, alpha=0.68)
+    ax3.legend(loc='upper left', fontsize=8)
     ax3.set_ylabel('MACD')
-    ax3.grid(True, which='both', ls=':')
     ax3.yaxis.set_major_locator(MaxNLocator(nbins=4))
+    ax3.grid(True, which='both', ls=':', alpha=0.38)
     fig.tight_layout()
     plt.subplots_adjust(hspace=0.04)
     img_path = f"{symbol}_grafik.png"
