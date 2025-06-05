@@ -469,6 +469,27 @@ def send_telegram_media_group(image_paths, symbols):
 
 def report_to_telegram():
     spot, fut, fut_pos = spot_and_futures_report()
+    # -- PORTFÖY LOG --
+    # spot ve futures toplamları logla
+    import re
+    import csv, os
+    from datetime import datetime
+    # Toplamları bulmak için spot ve futures stringlerinden USDT rakamlarını çek
+    spot_total = None
+    fut_balance = None
+    spot_match = re.search(r"Toplam: ≈ ([\d\.]+) USDT", spot)
+    fut_match = re.search(r"Bakiye: ([\d\.]+) USDT", fut)
+    if spot_match: spot_total = float(spot_match.group(1))
+    if fut_match: fut_balance = float(fut_match.group(1))
+    log_file = "portfoy_log.csv"
+    now = datetime.now().strftime("%Y-%m-%d %H:%M")
+    yaz_baslik = not os.path.exists(log_file) or os.path.getsize(log_file) == 0
+    if spot_total is not None and fut_balance is not None:
+        with open(log_file, "a", newline='') as f:
+            w = csv.writer(f)
+            if yaz_baslik:
+                w.writerow(["timestamp", "spot_total", "futures_balance"])
+            w.writerow([now, spot_total, fut_balance])
     ai = ai_futures_advice(fut_pos)
     tech = technical_analysis_report()
 
@@ -511,6 +532,69 @@ def report_to_telegram():
     if image_paths:
         send_telegram_media_group(image_paths, symbol_list)
 
+# -- ZAMANSAL PNL GRAFİĞİ GÖNDERİMİ --
+async def send_portfolio_curve_telegram(context, chat_id, log_file="portfoy_log.csv"):
+    import pandas as pd
+    import matplotlib.pyplot as plt
+    import os
+    if not os.path.exists(log_file):
+        await context.bot.send_message(chat_id=chat_id, text="Portfolio log dosyası yok.")
+        return
+    df = pd.read_csv(log_file)
+    if len(df) < 2:
+        await context.bot.send_message(chat_id=chat_id, text="Grafik için yeterli veri yok.")
+        return
+    fig, ax = plt.subplots(figsize=(8,4.5))
+    ax.plot(df['timestamp'], df['spot_total'], label="Spot Toplam", marker='o', color='orange')
+    ax.plot(df['timestamp'], df['futures_balance'], label="Futures Bakiye", marker='o', color='navy')
+    ax.set_title("Portföy Zaman Serisi (USDT)")
+    ax.set_xticks(range(0, len(df['timestamp']), max(1, len(df['timestamp'])//10)))
+    ax.set_xticklabels(df['timestamp'][::max(1, len(df['timestamp'])//10)], rotation=45, ha='right', fontsize=9)
+    ax.set_ylabel("Tutar (USDT)")
+    ax.legend()
+    plt.tight_layout()
+    img_path = "portfoy_curve.png"
+    plt.savefig(img_path, dpi=150)
+    plt.close(fig)
+    with open(img_path, "rb") as photo:
+        await context.bot.send_photo(chat_id=chat_id, photo=photo, caption="Portföy zaman serisi (log)")
+    try:
+        os.remove(img_path)
+    except:
+        pass
+# Her döngü sonunda klasik sync fonksiyon ile grafik gönder
+# Bu, otomasyon döngüsünde çalışmaya devam edecek
+
+def send_portfolio_curve(log_file="portfoy_log.csv"):
+    import pandas as pd
+    import matplotlib.pyplot as plt
+    import os
+    if not os.path.exists(log_file):
+        print("Portfolio log dosyası yok.")
+        return
+    df = pd.read_csv(log_file)
+    if len(df) < 2:
+        print("Grafik için yeterli veri yok.")
+        return
+    fig, ax = plt.subplots(figsize=(8,4.5))
+    ax.plot(df['timestamp'], df['spot_total'], label="Spot Toplam", marker='o', color='orange')
+    ax.plot(df['timestamp'], df['futures_balance'], label="Futures Bakiye", marker='o', color='navy')
+    ax.set_title("Portföy Zaman Serisi (USDT)")
+    ax.set_xticks(range(0, len(df['timestamp']), max(1, len(df['timestamp'])//10)))
+    ax.set_xticklabels(df['timestamp'][::max(1, len(df['timestamp'])//10)], rotation=45, ha='right', fontsize=9)
+    ax.set_ylabel("Tutar (USDT)")
+    ax.legend()
+    plt.tight_layout()
+    img_path = "portfoy_curve.png"
+    plt.savefig(img_path, dpi=150)
+    plt.close(fig)
+    send_telegram_photo(img_path, caption="Portföy zaman serisi (log)")
+    try:
+        os.remove(img_path)
+    except: pass
+# Otomatik loop için klasik fonksiyonu kullanmaya devam!
+send_portfolio_curve()
+
 def main():
     while True:
         report_to_telegram()
@@ -518,4 +602,24 @@ def main():
         time.sleep(3600)
 
 if __name__ == "__main__":
-    main()
+    # Telegram komut listener ANA THREAD'DE!
+    from telegram.ext import Application, CommandHandler, ContextTypes
+    from telegram import Update
+    import threading
+
+    async def handle_pnl(update: Update, context: ContextTypes.DEFAULT_TYPE):
+        await send_portfolio_curve_telegram(context, update.effective_chat.id)
+
+    def run_report_loop():
+        while True:
+            report_to_telegram()
+            print("Bir sonraki rapor için 1 saat bekleniyor...")
+            time.sleep(3600)
+
+    t = threading.Thread(target=run_report_loop, daemon=True)
+    t.start()
+    
+    app = Application.builder().token(config.TELEGRAM_TOKEN).build()  # timezone parametresi yok!
+    app.add_handler(CommandHandler("pnl", handle_pnl))
+    print("Telegram komut listener başlatıldı (örn. /pnl)")
+    app.run_polling()
