@@ -26,6 +26,7 @@ def summarize_and_translate_news(news):
     prompt = (
         "Aşağıda İngilizce kripto haber başlıkları ve özetleri var.\n"
         "Hepsini kısa ve sade Türkçeyle, önemli detayları aktaracak şekilde tek paragraflık haber özeti yap:\n\n"
+        "her haber özetinin arasına bir satır boşluk (paragraf) bırak:\n\n"
         f"{content}"
     )
     response = client.chat.completions.create(
@@ -45,6 +46,7 @@ def fetch_all_crypto_news(sources, limit=2):
     all_news = []
     for url in sources:
         feed = feedparser.parse(url)
+        print(f"{url}: {len(feed.entries)} haber bulundu")
         for entry in feed.entries[:limit]:
             summary = entry.summary if hasattr(entry, 'summary') else ''
             all_news.append({
@@ -475,7 +477,7 @@ def send_telegram_media_group(image_paths, symbols):
         f = open(img_path, "rb")
         files[f"photo{idx}"] = f
         file_handles.append(f)
-        caption = f"<b>{symbols[idx]} 1h Son 20 mum | EMA+RSI+MACD</b>" if idx == 0 else ""
+        caption = f"<b> 1 saatlik Son 20 mum" if idx == 0 else ""
         media_data.append({
             "type": "photo",
             "media": f"attach://photo{idx}",
@@ -535,10 +537,13 @@ def report_to_telegram():
     try:
         sources = [
             "https://cointelegraph.com/rss",
-            "https://www.coindesk.com/arc/outboundfeeds/rss/"
+            "https://www.coindesk.com/arc/outboundfeeds/rss/",
+            "https://www.newsbtc.com/feed/",
+            "https://cryptopanic.com/news/rss/"
         ]
         news = fetch_all_crypto_news(sources, limit=2)
         news_summary_tr = summarize_and_translate_news(news)
+        news_summary_tr = news_summary_tr.strip()
         news_text = "\n".join([
             f"<b>{n['title']}</b>\n{n['link']}"
             for n in news
