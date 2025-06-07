@@ -752,11 +752,7 @@ def get_all_user_ids():
         return [int(uid) for uid in data.keys()]
     except Exception:
         return []
-def main():
-    while True:
-        report_to_telegram()
-        print("Bir sonraki rapor için 1 saat bekleniyor...")
-        time.sleep(60)
+
 def run_report_loop():
     while True:
         for chat_id in get_all_user_ids():
