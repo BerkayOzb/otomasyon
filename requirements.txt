@@ -1,0 +1,8 @@
+pandas
+requests
+matplotlib
+mplfinance
+openai
+python-telegram-bot
+apscheduler==3.10.4
+pytz

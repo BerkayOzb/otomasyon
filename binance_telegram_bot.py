@@ -5,6 +5,7 @@ import requests
 import pandas as pd
 import openai
 import config
+import json
 import hmac
 import hashlib
 from urllib.parse import urlencode
@@ -15,6 +16,30 @@ import io
 import feedparser
 import re
 client = openai.OpenAI(api_key=config.OPENAI_API_KEY)
+
+# Kullanıcıya özel API key/secret yönetimi (JSON bazlı)
+USERAPI_FILE = "user_settings.json"
+def set_user_apikey(chat_id, api_key, api_secret):
+    """Kullanıcı için Binance API anahtarlarını kaydeder."""
+    try:
+        with open(USERAPI_FILE, "r") as f:
+            data = json.load(f)
+    except:
+        data = {}
+    data[str(chat_id)] = {"api_key": api_key, "api_secret": api_secret}
+    with open(USERAPI_FILE, "w") as f:
+        json.dump(data, f)
+
+def get_user_apikey(chat_id):
+    """Kullanıcıya atanmış Binance API anahtarlarını getirir"""
+    try:
+        with open(USERAPI_FILE, "r") as f:
+            data = json.load(f)
+        d = data.get(str(chat_id), None)
+        if d:
+            return d["api_key"], d["api_secret"]
+    except: pass
+    return None, None
 
 ##########################
 # BINANCE SIGNED REQUESTS#
@@ -58,6 +83,14 @@ def fetch_all_crypto_news(sources, limit=2):
             })
     return all_news
 def get_binance_signed_request(endpoint, params, api_key, api_secret, base_url):
+    """
+    Binance API'ye imzalı GET isteği gönderir, spot/futures gibi erişimlerde kullanılır.
+    endpoint: API'nın uç noktası (ör. /api/v3/account)
+    params: Sorgu parametreleri (dict)
+    api_key, api_secret: API Key/Secret
+    base_url: https://api.binance.com veya https://fapi.binance.com
+    return: JSON veri
+    """
     params['timestamp'] = int(time.time() * 1000)
     query_string = urlencode(params)
     signature = hmac.new(api_secret.encode(), query_string.encode(), hashlib.sha256).hexdigest()
@@ -66,10 +99,17 @@ def get_binance_signed_request(endpoint, params, api_key, api_secret, base_url):
     response = requests.get(url, headers=headers)
     return response.json()
 
-def get_spot_balances():
+def get_spot_balances(chat_id):
+    """
+    Kullanıcının Binance spot cüzdan varlıklarını (pozitif bakiyede olanları) çeker.
+    return: List dict [{'asset': ... , 'free': ..., 'locked': ...}, ...]
+    """
+    api_key, api_secret = get_user_apikey(chat_id)
+    if api_key is None or api_secret is None:
+        return None
     endpoint = '/api/v3/account'
     params = {}
-    data = get_binance_signed_request(endpoint, params, config.BINANCE_API_KEY, config.BINANCE_SECRET_KEY, 'https://api.binance.com')
+    data = get_binance_signed_request(endpoint, params, api_key, api_secret, 'https://api.binance.com')
     nonzero = [a for a in data['balances'] if float(a['free']) > 0.0001 or float(a['locked']) > 0.0001]
     assets = []
     for a in nonzero:
@@ -80,26 +120,47 @@ def get_spot_balances():
         })
     return assets
 
-def get_futures_positions():
+def get_futures_positions(chat_id):
+    """
+    Kullanıcının Binance Futures USDT-M cüzdanındaki açık pozisyonlarını döndürür.
+    return: List[dict] (pozisyon datası)
+    """
+    api_key, api_secret = get_user_apikey(chat_id)
+    if api_key is None or api_secret is None:
+        return None
     endpoint = '/fapi/v2/positionRisk'
     params = {}
-    data = get_binance_signed_request(endpoint, params, config.BINANCE_API_KEY, config.BINANCE_SECRET_KEY, 'https://fapi.binance.com')
+    data = get_binance_signed_request(endpoint, params, api_key, api_secret, 'https://fapi.binance.com')
     open_positions = [p for p in data if abs(float(p['positionAmt'])) > 0.0001]
     return open_positions
 
-def get_futures_balance():
+def get_futures_balance(chat_id):
+    """
+    Kullanıcının Binance Futures cüzdan bakiyesini döndürür.
+    return: float (USDT)
+    """
+    api_key, api_secret = get_user_apikey(chat_id)
+    if api_key is None or api_secret is None:
+        return None
     endpoint = '/fapi/v2/account'
     params = {}
-    data = get_binance_signed_request(endpoint, params, config.BINANCE_API_KEY, config.BINANCE_SECRET_KEY, 'https://fapi.binance.com')
+    data = get_binance_signed_request(endpoint, params, api_key, api_secret, 'https://fapi.binance.com')
     return float(data['totalWalletBalance'])
-def get_binance_klines(symbol="BTCUSDT", interval="1h", limit=100):
+
+def get_binance_klines(chat_id, symbol="BTCUSDT", interval="1h", limit=100):
+    """
+    Kullanıcının Binance API key/secret'ı ile o coinin OHLCV datasını çeker.
+    """
+    api_key, api_secret = get_user_apikey(chat_id)
+    if api_key is None or api_secret is None:
+        return None
     url = "https://api.binance.com/api/v3/klines"
     params = {
         "symbol": symbol,
         "interval": interval,
         "limit": limit
     }
-    response = requests.get(url, params=params)
+    response = requests.get(url, params=params, headers={"X-MBX-APIKEY": api_key})
     data = response.json()
     df = pd.DataFrame(data, columns=[
         'timestamp', 'open', 'high', 'low', 'close', 'volume',
@@ -113,6 +174,7 @@ def get_binance_klines(symbol="BTCUSDT", interval="1h", limit=100):
     return df
 
 def calc_rsi(prices, period=14):
+    """Verilen fiyat dizisinin RSI(14) değerini hesaplar."""
     delta = prices.diff()
     gain = (delta.where(delta > 0, 0)).rolling(window=period).mean()
     loss = (-delta.where(delta < 0, 0)).rolling(window=period).mean()
@@ -121,9 +183,14 @@ def calc_rsi(prices, period=14):
     return round(rsi.iloc[-1], 2)
 
 def calc_ema(prices, period=21):
+    """Kapanış fiyatlarından EMA (üstel hareketli ortalama) hesaplar."""
     return round(prices.ewm(span=period, adjust=False).mean().iloc[-1], 2)
 
 def calc_macd(prices, fast=12, slow=26, signal=9):
+    """
+    Kapanış fiyatlarından MACD, MACD Sinyal ve Histogram hesaplar.
+    return: tuple (macd, signal, hist)
+    """
     exp1 = prices.ewm(span=fast, adjust=False).mean()
     exp2 = prices.ewm(span=slow, adjust=False).mean()
     macd = exp1 - exp2
@@ -134,6 +201,10 @@ def calc_macd(prices, fast=12, slow=26, signal=9):
     return round(macd_val,2), round(signal_val,2), round(hist,2)
 
 def calc_bollinger(prices, period=20):
+    """
+    Kapanış fiyatlarından Bollinger bandı üst, alt ve orta çizgi hesaplar.
+    return: tuple (üst, alt, orta)
+    """
     sma = prices.rolling(window=period).mean()
     std = prices.rolling(window=period).std()
     upper = sma + (2 * std)
@@ -184,13 +255,14 @@ def split_message_smart(message, max_len=4000):
     return parts
 
 
-def send_telegram_message(message):
+def send_telegram_message(message, chat_id):
+    """Belirli bir kullanıcıya telegram mesajı gönderir."""
     url = f"https://api.telegram.org/bot{config.TELEGRAM_TOKEN}/sendMessage"
     MAX_LEN = 4000
     parts = split_message_smart(message, MAX_LEN)
     for idx, part in enumerate(parts):
         data = {
-            "chat_id": config.TELEGRAM_CHAT_ID,
+            "chat_id": chat_id,
             "text": part,
             "parse_mode": "HTML"
         }
@@ -199,10 +271,11 @@ def send_telegram_message(message):
         if resp.status_code != 200:
             print("Telegram Hata:", resp.status_code, resp.text)
 
-def send_telegram_photo(image_path, caption=None):
+def send_telegram_photo(image_path, chat_id, caption=None):
+    """Belirli bir kullanıcıya Telegram fotoğrafı gönderir."""
     url = f"https://api.telegram.org/bot{config.TELEGRAM_TOKEN}/sendPhoto"
     with open(image_path, "rb") as img:
-        data = {"chat_id": config.TELEGRAM_CHAT_ID}
+        data = {"chat_id": chat_id}
         if caption:
             data["caption"] = caption
             data["parse_mode"] = "HTML"
@@ -230,7 +303,7 @@ def analyze_and_report():
                 per_symbol_messages.append(f"{interval}: HATA: {e}")
         # Her sembol için tek mesaj olarak gönder
         message = f"{symbol} önerileri:\n" + "\n".join(per_symbol_messages)
-        send_telegram_message(message)
+        send_telegram_message(message,chat_id)
         print(message)
 
 
@@ -238,8 +311,12 @@ import matplotlib.dates as mdates
 from matplotlib.ticker import MaxNLocator
 from mplfinance.original_flavor import candlestick_ohlc
 
-def plot_ohlc_ema_rsi_macd(symbol, interval="1h", limit=20, ema_period=9):
-    df = get_binance_klines(symbol=symbol, interval=interval, limit=limit)
+def plot_ohlc_ema_rsi_macd(chat_id,symbol, interval="1h", limit=20, ema_period=9):
+    """
+    Klasik borsa tarzında, üstte candlestick (mum), üstünde EMA çizgisi, altta RSI ve MACD gösteren görsel (.png) üretir.
+    return: Kaydedilen dosya yolu (str)
+    """
+    df = get_binance_klines(chat_id,symbol=symbol, interval=interval, limit=limit)
     df['candle_time'] = pd.to_datetime(df['timestamp'], unit='ms')
     df['num_time'] = mdates.date2num(df['candle_time'])
     closes = df['close']
@@ -296,10 +373,16 @@ def plot_ohlc_ema_rsi_macd(symbol, interval="1h", limit=20, ema_period=9):
     plt.close(fig)
     return img_path
 
-def get_symbol_price(symbol="BTCUSDT"):
+def get_symbol_price(chat_id, symbol="BTCUSDT"):
+    api_key, api_secret = get_user_apikey(chat_id)
     url = f"https://api.binance.com/api/v3/ticker/price?symbol={symbol}"
-    r = requests.get(url)
-    return float(r.json()['price'])
+    response = requests.get(url, headers={"X-MBX-APIKEY": api_key})
+    r = response.json()
+    try:
+        return float(r['price'])
+    except Exception as e:
+        print(f"Spot için fiyat çekilemedi: {symbol}, hata: {e} -- Gelen response: {r}")
+        return 0
 
 def pnl_percent(entryPrice, markPrice, positionAmt, positionSide):
     try:
@@ -314,9 +397,12 @@ def pnl_percent(entryPrice, markPrice, positionAmt, positionSide):
     except:
         return 0.0
 
-def get_futures_position_table():
-    positions = get_futures_positions()
+def get_futures_position_table(chat_id):
+    """Kullanıcıya özel pozisyon risk datasını döndürür."""
+    positions = get_futures_positions(chat_id)
     pos_table = []
+    if positions is None:
+        return []
     for pos in positions:
         symbol = pos['symbol']
         amt = float(pos['positionAmt'])
@@ -340,16 +426,19 @@ def get_futures_position_table():
         })
     return pos_table
 
-def spot_and_futures_report():
+def spot_and_futures_report(chat_id):
+    """Kullanıcı bazlı spot ve futures raporu döndürür."""
     # SPOT:
-    spot_assets = get_spot_balances()
+    spot_assets = get_spot_balances(chat_id)
     spot_lines = []
     total_usd = 0
+    if spot_assets is None:
+        return "Kayıtlı API bulunamadı! Lütfen önce /apikey <KEY> <SECRET> ile kayıt olun.", "", []
     for a in spot_assets:
         symbol = a['asset'] + "USDT" if a['asset'] != "USDT" else "USDT"
         bal = a['free']+a['locked']
         try:
-            price = get_symbol_price(symbol) if a['asset'] != "USDT" else 1
+            price = get_symbol_price(chat_id, symbol) if a['asset'] != "USDT" else 1
             val = bal*price
         except:
             price = 0
@@ -363,8 +452,8 @@ def spot_and_futures_report():
     )
 
     # FUTURES:
-    fut_bal = get_futures_balance()
-    fut_pos = get_futures_position_table()
+    fut_bal = get_futures_balance(chat_id)
+    fut_pos = get_futures_position_table(chat_id)
     if fut_pos:
         fut_lines = [
             f"- {p['symbol']} | {p['side']} x{p['leverage']} | {round(p['amount'],4)} @ {p['entry']} → {p['mark']} | K/Z: {p['pnl_pct']}% ({round(p['upnl'], 2)} USDT)"
@@ -379,7 +468,7 @@ def spot_and_futures_report():
     return spot_report, fut_report, fut_pos
 
 
-def ai_futures_advice(fut_pos):
+def ai_futures_advice(chat_id,fut_pos):
     import html
     if not fut_pos:
         return "Herhangi bir açık pozisyon yok."
@@ -388,7 +477,7 @@ def ai_futures_advice(fut_pos):
         symbol = p['symbol']
         # 1h kapanış verisi ve indikatörler
         try:
-            df = get_binance_klines(symbol=symbol, interval='1h')
+            df = get_binance_klines(chat_id,symbol=symbol, interval='1h')
             closes = df['close']
             rsi = calc_rsi(closes)
             ema = calc_ema(closes)
@@ -418,7 +507,7 @@ Kesinlikle başlık, maddeleme, paragraf veya kategori ekleme. Sadece kısa ve b
     return response.choices[0].message.content.strip()
 
 
-def technical_analysis_report():
+def technical_analysis_report(chat_id):
     import html
     symbols = ["BTCUSDT", "ETHUSDT", "SOLUSDT"]
     intervals = ["1h", "4h", "1d"]
@@ -427,7 +516,7 @@ def technical_analysis_report():
         per_interval_metrics = []
         for interval in intervals:
             try:
-                df = get_binance_klines(symbol=symbol, interval=interval)
+                df = get_binance_klines(chat_id,symbol=symbol, interval=interval)
                 closes = df['close']
                 rsi = calc_rsi(closes)
                 ema = calc_ema(closes)
@@ -468,7 +557,7 @@ def technical_analysis_report():
     return "\n".join(lines)
 
 
-def send_telegram_media_group(image_paths, symbols):
+def send_telegram_media_group(image_paths, symbols,chat_id):
     url = f"https://api.telegram.org/bot{config.TELEGRAM_TOKEN}/sendMediaGroup"
     media_data = []
     files = {}
@@ -477,7 +566,7 @@ def send_telegram_media_group(image_paths, symbols):
         f = open(img_path, "rb")
         files[f"photo{idx}"] = f
         file_handles.append(f)
-        caption = f"<b> 1 saatlik Son 20 mum" if idx == 0 else ""
+        caption = f"<b> 1 saatlik Son 20 mum </b>" if idx == 0 else ""
         media_data.append({
             "type": "photo",
             "media": f"attach://photo{idx}",
@@ -486,7 +575,7 @@ def send_telegram_media_group(image_paths, symbols):
         })
     import json
     data = {
-        "chat_id": config.TELEGRAM_CHAT_ID,
+        "chat_id": chat_id,
         "media": json.dumps(media_data)
     }
     resp = requests.post(url, data=data, files=files)
@@ -508,10 +597,9 @@ def send_telegram_media_group(image_paths, symbols):
             print(f"{fp} silinemedi: {ex}")
 
 
-def report_to_telegram():
-    spot, fut, fut_pos = spot_and_futures_report()
+def report_to_telegram(chat_id):
+    spot, fut, fut_pos = spot_and_futures_report(chat_id)
     # -- PORTFÖY LOG --
-    # spot ve futures toplamları logla
     import re
     import csv, os
     from datetime import datetime
@@ -531,8 +619,8 @@ def report_to_telegram():
             if yaz_baslik:
                 w.writerow(["timestamp", "spot_total", "futures_balance"])
             w.writerow([now, spot_total, fut_balance])
-    ai = ai_futures_advice(fut_pos)
-    tech = technical_analysis_report()
+    ai = ai_futures_advice(chat_id, fut_pos)
+    tech = technical_analysis_report(chat_id)
     # --- Haberleri ekle --- #
     try:
         sources = [
@@ -569,18 +657,18 @@ def report_to_telegram():
         tech +
         news_block
     )
-    send_telegram_message(msg)
+    send_telegram_message(msg, chat_id)
     print(msg)
 
-    # Toplu coin görsellerini biriktir ve media group olarak gönder:
+    # Tüm coinlerden güncel ve tekil bir liste elde edelim (hem kodda geçen coinlerden hem de spot/futures cüzdan)
     symbols = set(["BTCUSDT", "ETHUSDT", "SOLUSDT"])
     try:
-        spot_balances = get_spot_balances()
+        spot_balances = get_spot_balances(chat_id)
         symbols.update([a['asset']+"USDT" for a in spot_balances if a['asset'] != "USDT"])
     except:
         pass
     try:
-        fut_pos = get_futures_position_table()
+        fut_pos = get_futures_position_table(chat_id)
         symbols.update([p['symbol'] for p in fut_pos])
     except:
         pass
@@ -588,13 +676,13 @@ def report_to_telegram():
     symbol_list = []
     for sym in symbols:
         try:
-            img_path = plot_ohlc_ema_rsi_macd(sym)
+            img_path = plot_ohlc_ema_rsi_macd(chat_id, sym)
             image_paths.append(img_path)
             symbol_list.append(sym)
         except Exception as e:
             print(f"Görsel oluşturma hatası {sym}: {e}")
     if image_paths:
-        send_telegram_media_group(image_paths, symbol_list)
+        send_telegram_media_group(image_paths, symbol_list, chat_id)
 
 # -- ZAMANSAL PNL GRAFİĞİ GÖNDERİMİ --
 async def send_portfolio_curve_telegram(context, chat_id, log_file="portfoy_log.csv"):
@@ -629,7 +717,7 @@ async def send_portfolio_curve_telegram(context, chat_id, log_file="portfoy_log.
 # Her döngü sonunda klasik sync fonksiyon ile grafik gönder
 # Bu, otomasyon döngüsünde çalışmaya devam edecek
 
-def send_portfolio_curve(log_file="portfoy_log.csv"):
+def send_portfolio_curve(chat_id, log_file="portfoy_log.csv"):
     import pandas as pd
     import matplotlib.pyplot as plt
     import os
@@ -652,38 +740,61 @@ def send_portfolio_curve(log_file="portfoy_log.csv"):
     img_path = "portfoy_curve.png"
     plt.savefig(img_path, dpi=150)
     plt.close(fig)
-    send_telegram_photo(img_path, caption="Portföy zaman serisi (log)")
+    send_telegram_photo(img_path, chat_id, caption="Portföy zaman serisi (log)")
     try:
         os.remove(img_path)
     except: pass
-# Otomatik loop için klasik fonksiyonu kullanmaya devam!
-send_portfolio_curve()
-
+# Otomatik loop için klasik fonksiyonu her kullanıcı için chat_id ile çağırman gerekir!
+def get_all_user_ids():
+    try:
+        with open(USERAPI_FILE, "r") as f:
+            data = json.load(f)
+        return [int(uid) for uid in data.keys()]
+    except Exception:
+        return []
 def main():
     while True:
         report_to_telegram()
         print("Bir sonraki rapor için 1 saat bekleniyor...")
+        time.sleep(60)
+def run_report_loop():
+    while True:
+        for chat_id in get_all_user_ids():
+            try:
+                report_to_telegram(chat_id)
+            except Exception as e:
+                print(f"{chat_id} için rapor hatası:", e)
+        print("Bir sonraki rapor için 1 saat bekleniyor...")
         time.sleep(3600)
-
 if __name__ == "__main__":
     # Telegram komut listener ANA THREAD'DE!
     from telegram.ext import Application, CommandHandler, ContextTypes
     from telegram import Update
     import threading
 
+    async def handle_apikey(update: Update, context: ContextTypes.DEFAULT_TYPE):
+        """Kullanıcıdan API anahtarı al ve kaydet."""
+        args = context.args
+        if len(args) != 2:
+            await update.message.reply_text("Kullanım: /apikey <API_KEY> <API_SECRET>")
+            return
+        key, secret = args[0], args[1]
+        set_user_apikey(update.effective_chat.id, key, secret)
+        await update.message.reply_text("API anahtarlarınız kaydedildi ✅\nArtık tüm analiz ve portföy işlemleri bu hesapla yapılacaktır.")
+        try:
+            report_to_telegram(update.effective_chat.id)
+        except Exception as e:
+            await update.message.reply_text(f"🚫 Rapor üretilemedi: {e}")        
     async def handle_pnl(update: Update, context: ContextTypes.DEFAULT_TYPE):
         await send_portfolio_curve_telegram(context, update.effective_chat.id)
 
-    def run_report_loop():
-        while True:
-            report_to_telegram()
-            print("Bir sonraki rapor için 1 saat bekleniyor...")
-            time.sleep(3600)
+
 
     t = threading.Thread(target=run_report_loop, daemon=True)
     t.start()
     
     app = Application.builder().token(config.TELEGRAM_TOKEN).build()  # timezone parametresi yok!
+    app.add_handler(CommandHandler("apikey", handle_apikey))
     app.add_handler(CommandHandler("pnl", handle_pnl))
     print("Telegram komut listener başlatıldı (örn. /pnl)")
     app.run_polling()
