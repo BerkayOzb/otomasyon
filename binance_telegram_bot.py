@@ -12,12 +12,30 @@ import matplotlib.pyplot as plt
 import matplotlib.dates as mdates
 from matplotlib.ticker import MaxNLocator
 import io
-
+import feedparser
+import re
 client = openai.OpenAI(api_key=config.OPENAI_API_KEY)
 
 ##########################
 # BINANCE SIGNED REQUESTS#
 ##########################
+
+def strip_html_tags(text):
+    clean = re.compile('<.*?>')
+    return re.sub(clean, '', text)
+
+def fetch_latest_cryptonews(limit=3):
+    RSS_URL = "https://cointelegraph.com/rss"
+    feed = feedparser.parse(RSS_URL)
+    news_list = []
+    for entry in feed.entries[:limit]:
+        news_list.append({
+            "title": entry.title,
+            "summary": entry.summary,
+            "link": entry.link,
+            "published": entry.published
+        })
+    return news_list
 def get_binance_signed_request(endpoint, params, api_key, api_secret, base_url):
     params['timestamp'] = int(time.time() * 1000)
     query_string = urlencode(params)
@@ -494,7 +512,21 @@ def report_to_telegram():
             w.writerow([now, spot_total, fut_balance])
     ai = ai_futures_advice(fut_pos)
     tech = technical_analysis_report()
-
+         # --- Haberleri ekle --- #
+    try:
+        news = fetch_latest_cryptonews(3)
+        news_text = "\n".join([
+            f"<b>{n['title']}</b>\n{strip_html_tags(n['summary'])}\n{n['link']}"
+            for n in news
+        ])
+        news_block = (
+            "\n-------------------------------\n"
+            "🌎 <b>Son Kripto Haberler (Cointelegraph)</b>:\n"
+            f"{news_text}"
+        )
+    except Exception as e:
+        news_block = f"\n-------------------------------\nKripto haberleri alınırken hata: {e}"
+    # ----------------------- #
     msg = (
         "✅ Binance Varlık ve Analiz Raporu\n" +
         "-------------------------------\n" +
@@ -505,7 +537,8 @@ def report_to_telegram():
         "🤖 AI Futures Analizi\n" +
         ai +
         "\n-------------------------------\n" +
-        tech
+        tech +
+        news_block
     )
     send_telegram_message(msg)
     print(msg)
