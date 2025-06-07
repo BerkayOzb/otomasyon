@@ -19,23 +19,42 @@ client = openai.OpenAI(api_key=config.OPENAI_API_KEY)
 ##########################
 # BINANCE SIGNED REQUESTS#
 ##########################
+def summarize_and_translate_news(news):
+    # news: [{'title': ..., 'summary': ..., ...}, ...]
+    articles = [f"{n['title']}\n{n['summary']}" for n in news]
+    content = "\n\n".join(articles)
+    prompt = (
+        "Aşağıda İngilizce kripto haber başlıkları ve özetleri var.\n"
+        "Hepsini kısa ve sade Türkçeyle, önemli detayları aktaracak şekilde tek paragraflık haber özeti yap:\n\n"
+        f"{content}"
+    )
+    response = client.chat.completions.create(
+        model="gpt-4o",
+        messages=[
+            {"role": "system", "content": "Sen profesyonel bir haber redaktörüsün."},
+            {"role": "user", "content": prompt}
+        ]
+    )
+    return response.choices[0].message.content.strip()
 
 def strip_html_tags(text):
     clean = re.compile('<.*?>')
     return re.sub(clean, '', text)
 
-def fetch_latest_cryptonews(limit=3):
-    RSS_URL = "https://cointelegraph.com/rss"
-    feed = feedparser.parse(RSS_URL)
-    news_list = []
-    for entry in feed.entries[:limit]:
-        news_list.append({
-            "title": entry.title,
-            "summary": entry.summary,
-            "link": entry.link,
-            "published": entry.published
-        })
-    return news_list
+def fetch_all_crypto_news(sources, limit=2):
+    all_news = []
+    for url in sources:
+        feed = feedparser.parse(url)
+        for entry in feed.entries[:limit]:
+            summary = entry.summary if hasattr(entry, 'summary') else ''
+            all_news.append({
+                "title": entry.title,
+                "summary": strip_html_tags(summary),
+                "link": entry.link,
+                "published": getattr(entry, 'published', ''),
+                "source": url
+            })
+    return all_news
 def get_binance_signed_request(endpoint, params, api_key, api_secret, base_url):
     params['timestamp'] = int(time.time() * 1000)
     query_string = urlencode(params)
@@ -512,17 +531,22 @@ def report_to_telegram():
             w.writerow([now, spot_total, fut_balance])
     ai = ai_futures_advice(fut_pos)
     tech = technical_analysis_report()
-         # --- Haberleri ekle --- #
+    # --- Haberleri ekle --- #
     try:
-        news = fetch_latest_cryptonews(3)
+        sources = [
+            "https://cointelegraph.com/rss",
+            "https://www.coindesk.com/arc/outboundfeeds/rss/"
+        ]
+        news = fetch_all_crypto_news(sources, limit=2)
+        news_summary_tr = summarize_and_translate_news(news)
         news_text = "\n".join([
-            f"<b>{n['title']}</b>\n{strip_html_tags(n['summary'])}\n{n['link']}"
+            f"<b>{n['title']}</b>\n{n['link']}"
             for n in news
         ])
         news_block = (
             "\n-------------------------------\n"
-            "🌎 <b>Son Kripto Haberler (Cointelegraph)</b>:\n"
-            f"{news_text}"
+            "🌎 <b>Son Kripto Haberler</b>:\n"
+            f"{news_summary_tr}"
         )
     except Exception as e:
         news_block = f"\n-------------------------------\nKripto haberleri alınırken hata: {e}"
