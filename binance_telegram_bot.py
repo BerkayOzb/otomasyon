@@ -763,13 +763,11 @@ def run_report_loop():
         print("Bir sonraki rapor için 1 saat bekleniyor...")
         time.sleep(3600)
 if __name__ == "__main__":
-    # Telegram komut listener ANA THREAD'DE!
     from telegram.ext import Application, CommandHandler, ContextTypes
     from telegram import Update
     import threading
 
     async def handle_apikey(update: Update, context: ContextTypes.DEFAULT_TYPE):
-        """Kullanıcıdan API anahtarı al ve kaydet."""
         args = context.args
         if len(args) != 2:
             await update.message.reply_text("Kullanım: /apikey <API_KEY> <API_SECRET>")
@@ -780,16 +778,25 @@ if __name__ == "__main__":
         try:
             report_to_telegram(update.effective_chat.id)
         except Exception as e:
-            await update.message.reply_text(f"🚫 Rapor üretilemedi: {e}")        
+            await update.message.reply_text(f"🚫 Rapor üretilemedi: {e}")
+
     async def handle_pnl(update: Update, context: ContextTypes.DEFAULT_TYPE):
         await send_portfolio_curve_telegram(context, update.effective_chat.id)
 
-
+    async def handle_rapor(update: Update, context: ContextTypes.DEFAULT_TYPE):
+        chat_id = update.effective_chat.id
+        await update.message.reply_text("Raporunuz hazırlanıyor, lütfen bekleyin...")
+        try:
+            import threading
+            threading.Thread(target=report_to_telegram, args=(chat_id,)).start()
+        except Exception as e:
+            await update.message.reply_text(f"🚫 Rapor üretilemedi: {e}")
 
     t = threading.Thread(target=run_report_loop, daemon=True)
     t.start()
     
-    app = Application.builder().token(config.TELEGRAM_TOKEN).build()  # timezone parametresi yok!
+    app = Application.builder().token(config.TELEGRAM_TOKEN).build()
+    app.add_handler(CommandHandler("rapor", handle_rapor))
     app.add_handler(CommandHandler("apikey", handle_apikey))
     app.add_handler(CommandHandler("pnl", handle_pnl))
     print("Telegram komut listener başlatıldı (örn. /pnl)")
