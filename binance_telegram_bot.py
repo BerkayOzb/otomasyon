@@ -15,6 +15,7 @@ from matplotlib.ticker import MaxNLocator
 import io
 import feedparser
 import re
+import os
 client = openai.OpenAI(api_key=config.OPENAI_API_KEY)
 
 # Kullanıcıya özel API key/secret yönetimi (JSON bazlı)
@@ -817,6 +818,7 @@ def run_report_loop():
                 print(f"{chat_id} için rapor hatası:", e)
 
         # -- Döngü sonunda temp dosyaları temizle --
+        import os
         for fp in set(image_cache.values()):
             try:
                 os.remove(fp)
