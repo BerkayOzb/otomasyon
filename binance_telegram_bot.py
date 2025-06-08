@@ -14,11 +14,12 @@ import matplotlib.dates as mdates
 from matplotlib.ticker import MaxNLocator
 import io
 import feedparser
-import re
 import os
 import sqlite3
 from cryptography.fernet import Fernet
 
+# NOT: 're' modülü iki kez import ediliyordu, biri kaldırıldı.
+# NOT: 'matplotlib.dates as mdates' ve 'matplotlib.ticker as MaxNLocator' iki kez import ediliyordu, biri kaldırıldı.
 
 fernet = Fernet(config.FERNET_KEY)
 client = openai.OpenAI(api_key=config.OPENAI_API_KEY)
@@ -675,22 +676,7 @@ def report_to_telegram(chat_id, news_block=None, image_cache=None, user_symbols=
         send_telegram_media_group(image_paths, symbol_list, chat_id)
 
 # -- ZAMANSAL PNL GRAFİĞİ GÖNDERİMİ --
-async def send_portfolio_curve_telegram(context, chat_id, log_db="portfoy_logs.sqlite3"):
-    import matplotlib.pyplot as plt
-    import sqlite3
-    import pandas as pd
-    import os
-    conn = sqlite3.connect(log_db)
-    try:
-        df = pd.read_sql_query(
-            "SELECT * FROM pnl_log WHERE chat_id = ? ORDER BY timestamp",
-            conn, params=(chat_id,)
-        )
-    finally:
-        conn.close()
-    if df.empty or len(df) < 2:
-        await context.bot.send_message(chat_id=chat_id, text="Kullanıcıya ait yeterli log yok veya hiç yok!")
-        return
+def generate_portfolio_curve_figure(df):
     fig, ax = plt.subplots(figsize=(8,4.5))
     ax.plot(df['timestamp'], df['spot_total'], label="Spot Toplam", marker='o', color='orange')
     ax.plot(df['timestamp'], df['futures_balance'], label="Futures Bakiye", marker='o', color='navy')
@@ -703,19 +689,12 @@ async def send_portfolio_curve_telegram(context, chat_id, log_db="portfoy_logs.s
     img_path = "portfoy_curve.png"
     plt.savefig(img_path, dpi=150)
     plt.close(fig)
-    with open(img_path, "rb") as photo:
-        await context.bot.send_photo(chat_id=chat_id, photo=photo, caption="Portföy zaman serisi (log)")
-    try:
-        os.remove(img_path)
-    except: pass
+    return img_path
+
 # Her döngü sonunda klasik sync fonksiyon ile grafik gönder
 # Bu, otomasyon döngüsünde çalışmaya devam edecek
 
 def send_portfolio_curve(chat_id, log_db="portfoy_logs.sqlite3"):
-    import matplotlib.pyplot as plt
-    import sqlite3
-    import pandas as pd
-    import os
     conn = sqlite3.connect(log_db)
     try:
         df = pd.read_sql_query(
@@ -727,18 +706,7 @@ def send_portfolio_curve(chat_id, log_db="portfoy_logs.sqlite3"):
     if df.empty or len(df) < 2:
         print("Kullanıcıya ait yeterli log yok veya hiç yok!")
         return
-    fig, ax = plt.subplots(figsize=(8,4.5))
-    ax.plot(df['timestamp'], df['spot_total'], label="Spot Toplam", marker='o', color='orange')
-    ax.plot(df['timestamp'], df['futures_balance'], label="Futures Bakiye", marker='o', color='navy')
-    ax.set_title("Portföy Zaman Serisi (USDT)")
-    ax.set_xticks(range(0, len(df['timestamp']), max(1, len(df['timestamp'])//10)))
-    ax.set_xticklabels(df['timestamp'][::max(1, len(df['timestamp'])//10)], rotation=45, ha='right', fontsize=9)
-    ax.set_ylabel("Tutar (USDT)")
-    ax.legend()
-    plt.tight_layout()
-    img_path = "portfoy_curve.png"
-    plt.savefig(img_path, dpi=150)
-    plt.close(fig)
+    img_path = generate_portfolio_curve_figure(df)
     send_telegram_photo(img_path, chat_id, caption="Portföy zaman serisi (log)")
     try:
         os.remove(img_path)
@@ -881,6 +849,25 @@ def run_report_loop():
                 print(f"{fp} silinemedi: {ex}")
         print("Bir sonraki rapor için 1 saat bekleniyor...")
         time.sleep(3600)
+async def send_portfolio_curve_telegram(context, chat_id, log_db="portfoy_logs.sqlite3"):
+    conn = sqlite3.connect(log_db)
+    try:
+        df = pd.read_sql_query(
+            "SELECT * FROM pnl_log WHERE chat_id = ? ORDER BY timestamp",
+            conn, params=(chat_id,)
+        )
+    finally:
+        conn.close()
+    if df.empty or len(df) < 2:
+        await context.bot.send_message(chat_id=chat_id, text="Kullanıcıya ait yeterli log yok veya hiç yok!")
+        return
+    img_path = generate_portfolio_curve_figure(df)
+    with open(img_path, "rb") as photo:
+        await context.bot.send_photo(chat_id=chat_id, photo=photo, caption="Portföy zaman serisi (log)")
+    try:
+        os.remove(img_path)
+    except: pass
+
 if __name__ == "__main__":
     from telegram.ext import Application, CommandHandler, ContextTypes
     from telegram import Update
