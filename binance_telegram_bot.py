@@ -16,30 +16,39 @@ import io
 import feedparser
 import re
 import os
+from cryptography.fernet import Fernet
+
+
+fernet = Fernet(config.FERNET_KEY)
 client = openai.OpenAI(api_key=config.OPENAI_API_KEY)
 
 # Kullanıcıya özel API key/secret yönetimi (JSON bazlı)
 USERAPI_FILE = "user_settings.json"
 def set_user_apikey(chat_id, api_key, api_secret):
-    """Kullanıcı için Binance API anahtarlarını kaydeder."""
+    """Kullanıcı için Binance API anahtarlarını ŞİFRELİ kaydeder."""
+    encoded_api_key = fernet.encrypt(api_key.encode()).decode()
+    encoded_api_secret = fernet.encrypt(api_secret.encode()).decode()
     try:
         with open(USERAPI_FILE, "r") as f:
             data = json.load(f)
     except:
         data = {}
-    data[str(chat_id)] = {"api_key": api_key, "api_secret": api_secret}
+    data[str(chat_id)] = {"api_key": encoded_api_key, "api_secret": encoded_api_secret}
     with open(USERAPI_FILE, "w") as f:
         json.dump(data, f)
 
 def get_user_apikey(chat_id):
-    """Kullanıcıya atanmış Binance API anahtarlarını getirir"""
+    """Kullanıcıya atanmış Binance API anahtarlarını çözülmüş şekilde getirir."""
     try:
         with open(USERAPI_FILE, "r") as f:
             data = json.load(f)
         d = data.get(str(chat_id), None)
         if d:
-            return d["api_key"], d["api_secret"]
-    except: pass
+            api_key = fernet.decrypt(d["api_key"].encode()).decode()
+            api_secret = fernet.decrypt(d["api_secret"].encode()).decode()
+            return api_key, api_secret
+    except Exception as e:
+        print(f"API anahtarı çözülemedi! {e}")
     return None, None
 
 ##########################
