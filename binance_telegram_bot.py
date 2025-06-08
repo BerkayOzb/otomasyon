@@ -16,6 +16,7 @@ import io
 import feedparser
 import re
 import os
+import sqlite3
 from cryptography.fernet import Fernet
 
 
@@ -23,32 +24,45 @@ fernet = Fernet(config.FERNET_KEY)
 client = openai.OpenAI(api_key=config.OPENAI_API_KEY)
 
 # Kullanıcıya özel API key/secret yönetimi (JSON bazlı)
-USERAPI_FILE = "user_settings.json"
+def get_db():
+    return sqlite3.connect('portfoy_logs.sqlite3')
+
 def set_user_apikey(chat_id, api_key, api_secret):
-    """Kullanıcı için Binance API anahtarlarını ŞİFRELİ kaydeder."""
     encoded_api_key = fernet.encrypt(api_key.encode()).decode()
     encoded_api_secret = fernet.encrypt(api_secret.encode()).decode()
+    conn = get_db()
     try:
-        with open(USERAPI_FILE, "r") as f:
-            data = json.load(f)
-    except:
-        data = {}
-    data[str(chat_id)] = {"api_key": encoded_api_key, "api_secret": encoded_api_secret}
-    with open(USERAPI_FILE, "w") as f:
-        json.dump(data, f)
+        c = conn.cursor()
+        c.execute("""
+            CREATE TABLE IF NOT EXISTS user_api (
+                chat_id INTEGER PRIMARY KEY,
+                api_key TEXT,
+                api_secret TEXT
+            )
+        """)
+        c.execute("""
+            INSERT INTO user_api (chat_id, api_key, api_secret)
+            VALUES (?, ?, ?)
+            ON CONFLICT(chat_id) DO UPDATE SET api_key=excluded.api_key, api_secret=excluded.api_secret
+        """, (chat_id, encoded_api_key, encoded_api_secret))
+        conn.commit()
+    finally:
+        conn.close()
 
 def get_user_apikey(chat_id):
-    """Kullanıcıya atanmış Binance API anahtarlarını çözülmüş şekilde getirir."""
+    conn = get_db()
     try:
-        with open(USERAPI_FILE, "r") as f:
-            data = json.load(f)
-        d = data.get(str(chat_id), None)
-        if d:
-            api_key = fernet.decrypt(d["api_key"].encode()).decode()
-            api_secret = fernet.decrypt(d["api_secret"].encode()).decode()
+        c = conn.cursor()
+        c.execute('SELECT api_key, api_secret FROM user_api WHERE chat_id=?', (chat_id,))
+        row = c.fetchone()
+        if row:
+            api_key = fernet.decrypt(row[0].encode()).decode()
+            api_secret = fernet.decrypt(row[1].encode()).decode()
             return api_key, api_secret
     except Exception as e:
         print(f"API anahtarı çözülemedi! {e}")
+    finally:
+        conn.close()
     return None, None
 
 ##########################
@@ -608,25 +622,35 @@ def send_telegram_media_group(image_paths, symbols,chat_id):
 
 
 def report_to_telegram(chat_id, news_block=None, image_cache=None, user_symbols=None, tech_cache=None):
-    spot, fut, fut_pos = spot_and_futures_report(chat_id)
     import re
-    import csv, os
     from datetime import datetime
+    # -- SPOT VE FUTURES RAPOR VE DB YE KAYIT --
+    spot, fut, fut_pos = spot_and_futures_report(chat_id)
     spot_total = None
     fut_balance = None
     spot_match = re.search(r"Toplam: ≈ ([\d\.]+) USDT", spot)
     fut_match = re.search(r"Bakiye: ([\d\.]+) USDT", fut)
     if spot_match: spot_total = float(spot_match.group(1))
     if fut_match: fut_balance = float(fut_match.group(1))
-    log_file = "portfoy_log.csv"
     now = datetime.now().strftime("%Y-%m-%d %H:%M")
-    yaz_baslik = not os.path.exists(log_file) or os.path.getsize(log_file) == 0
-    if spot_total is not None and fut_balance is not None:
-        with open(log_file, "a", newline='') as f:
-            w = csv.writer(f)
-            if yaz_baslik:
-                w.writerow(["timestamp", "spot_total", "futures_balance"])
-            w.writerow([now, spot_total, fut_balance])
+    # --- SQLITE KULLAN: ---
+    try:
+        with sqlite3.connect('portfoy_logs.sqlite3') as conn:
+            c = conn.cursor()
+            c.execute("""
+                CREATE TABLE IF NOT EXISTS pnl_log (
+                    timestamp TEXT,
+                    chat_id INTEGER,
+                    spot_total REAL,
+                    futures_balance REAL
+                )
+            """)
+            if spot_total is not None and fut_balance is not None:
+                c.execute("INSERT INTO pnl_log (timestamp, chat_id, spot_total, futures_balance) VALUES (?, ?, ?, ?)",
+                    (now, chat_id, spot_total, fut_balance))
+            conn.commit()
+    except Exception as e:
+        print(f"[SQLITE LOG] hata: {e}")
     ai = ai_futures_advice(chat_id, fut_pos)
     tech = tech_cache if tech_cache else technical_analysis_report(chat_id)
     msg = (
@@ -651,16 +675,21 @@ def report_to_telegram(chat_id, news_block=None, image_cache=None, user_symbols=
         send_telegram_media_group(image_paths, symbol_list, chat_id)
 
 # -- ZAMANSAL PNL GRAFİĞİ GÖNDERİMİ --
-async def send_portfolio_curve_telegram(context, chat_id, log_file="portfoy_log.csv"):
-    import pandas as pd
+async def send_portfolio_curve_telegram(context, chat_id, log_db="portfoy_logs.sqlite3"):
     import matplotlib.pyplot as plt
+    import sqlite3
+    import pandas as pd
     import os
-    if not os.path.exists(log_file):
-        await context.bot.send_message(chat_id=chat_id, text="Portfolio log dosyası yok.")
-        return
-    df = pd.read_csv(log_file)
-    if len(df) < 2:
-        await context.bot.send_message(chat_id=chat_id, text="Grafik için yeterli veri yok.")
+    conn = sqlite3.connect(log_db)
+    try:
+        df = pd.read_sql_query(
+            "SELECT * FROM pnl_log WHERE chat_id = ? ORDER BY timestamp",
+            conn, params=(chat_id,)
+        )
+    finally:
+        conn.close()
+    if df.empty or len(df) < 2:
+        await context.bot.send_message(chat_id=chat_id, text="Kullanıcıya ait yeterli log yok veya hiç yok!")
         return
     fig, ax = plt.subplots(figsize=(8,4.5))
     ax.plot(df['timestamp'], df['spot_total'], label="Spot Toplam", marker='o', color='orange')
@@ -678,21 +707,25 @@ async def send_portfolio_curve_telegram(context, chat_id, log_file="portfoy_log.
         await context.bot.send_photo(chat_id=chat_id, photo=photo, caption="Portföy zaman serisi (log)")
     try:
         os.remove(img_path)
-    except:
-        pass
+    except: pass
 # Her döngü sonunda klasik sync fonksiyon ile grafik gönder
 # Bu, otomasyon döngüsünde çalışmaya devam edecek
 
-def send_portfolio_curve(chat_id, log_file="portfoy_log.csv"):
-    import pandas as pd
+def send_portfolio_curve(chat_id, log_db="portfoy_logs.sqlite3"):
     import matplotlib.pyplot as plt
+    import sqlite3
+    import pandas as pd
     import os
-    if not os.path.exists(log_file):
-        print("Portfolio log dosyası yok.")
-        return
-    df = pd.read_csv(log_file)
-    if len(df) < 2:
-        print("Grafik için yeterli veri yok.")
+    conn = sqlite3.connect(log_db)
+    try:
+        df = pd.read_sql_query(
+            "SELECT * FROM pnl_log WHERE chat_id = ? ORDER BY timestamp",
+            conn, params=(chat_id,)
+        )
+    finally:
+        conn.close()
+    if df.empty or len(df) < 2:
+        print("Kullanıcıya ait yeterli log yok veya hiç yok!")
         return
     fig, ax = plt.subplots(figsize=(8,4.5))
     ax.plot(df['timestamp'], df['spot_total'], label="Spot Toplam", marker='o', color='orange')
@@ -712,12 +745,25 @@ def send_portfolio_curve(chat_id, log_file="portfoy_log.csv"):
     except: pass
 # Otomatik loop için klasik fonksiyonu her kullanıcı için chat_id ile çağırman gerekir!
 def get_all_user_ids():
+    import sqlite3
+    conn = sqlite3.connect('portfoy_logs.sqlite3')
     try:
-        with open(USERAPI_FILE, "r") as f:
-            data = json.load(f)
-        return [int(uid) for uid in data.keys()]
-    except Exception:
+        c = conn.cursor()
+        c.execute('''
+            CREATE TABLE IF NOT EXISTS user_api (
+                chat_id INTEGER PRIMARY KEY,
+                api_key TEXT,
+                api_secret TEXT
+            )
+        ''')
+        c.execute('SELECT chat_id FROM user_api')
+        results = c.fetchall()
+        return [int(row[0]) for row in results]
+    except Exception as e:
+        print(f"get_all_user_ids sqlite hata: {e}")
         return []
+    finally:
+        conn.close()
 
 def technical_analysis_report_batch(chat_id_any):
     import html
