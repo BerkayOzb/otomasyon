@@ -597,13 +597,11 @@ def send_telegram_media_group(image_paths, symbols,chat_id):
             print(f"{fp} silinemedi: {ex}")
 
 
-def report_to_telegram(chat_id):
+def report_to_telegram(chat_id, news_block=None, image_cache=None, user_symbols=None, tech_cache=None):
     spot, fut, fut_pos = spot_and_futures_report(chat_id)
-    # -- PORTFÖY LOG --
     import re
     import csv, os
     from datetime import datetime
-    # Toplamları bulmak için spot ve futures stringlerinden USDT rakamlarını çek
     spot_total = None
     fut_balance = None
     spot_match = re.search(r"Toplam: ≈ ([\d\.]+) USDT", spot)
@@ -620,30 +618,7 @@ def report_to_telegram(chat_id):
                 w.writerow(["timestamp", "spot_total", "futures_balance"])
             w.writerow([now, spot_total, fut_balance])
     ai = ai_futures_advice(chat_id, fut_pos)
-    tech = technical_analysis_report(chat_id)
-    # --- Haberleri ekle --- #
-    try:
-        sources = [
-            "https://cointelegraph.com/rss",
-            "https://www.coindesk.com/arc/outboundfeeds/rss/",
-            "https://www.newsbtc.com/feed/",
-            "https://cryptopanic.com/news/rss/"
-        ]
-        news = fetch_all_crypto_news(sources, limit=2)
-        news_summary_tr = summarize_and_translate_news(news)
-        news_summary_tr = news_summary_tr.strip()
-        news_text = "\n".join([
-            f"<b>{n['title']}</b>\n{n['link']}"
-            for n in news
-        ])
-        news_block = (
-            "\n-------------------------------\n"
-            "🌎 <b>Son Kripto Haberler</b>:\n"
-            f"{news_summary_tr}"
-        )
-    except Exception as e:
-        news_block = f"\n-------------------------------\nKripto haberleri alınırken hata: {e}"
-    # ----------------------- #
+    tech = tech_cache if tech_cache else technical_analysis_report(chat_id)
     msg = (
         "✅ Binance Varlık ve Analiz Raporu\n" +
         "-------------------------------\n" +
@@ -655,32 +630,13 @@ def report_to_telegram(chat_id):
         ai +
         "\n-------------------------------\n" +
         tech +
-        news_block
+        (news_block if news_block else "")
     )
     send_telegram_message(msg, chat_id)
     print(msg)
-
-    # Tüm coinlerden güncel ve tekil bir liste elde edelim (hem kodda geçen coinlerden hem de spot/futures cüzdan)
-    symbols = set(["BTCUSDT", "ETHUSDT", "SOLUSDT"])
-    try:
-        spot_balances = get_spot_balances(chat_id)
-        symbols.update([a['asset']+"USDT" for a in spot_balances if a['asset'] != "USDT"])
-    except:
-        pass
-    try:
-        fut_pos = get_futures_position_table(chat_id)
-        symbols.update([p['symbol'] for p in fut_pos])
-    except:
-        pass
-    image_paths = []
-    symbol_list = []
-    for sym in symbols:
-        try:
-            img_path = plot_ohlc_ema_rsi_macd(chat_id, sym)
-            image_paths.append(img_path)
-            symbol_list.append(sym)
-        except Exception as e:
-            print(f"Görsel oluşturma hatası {sym}: {e}")
+    symbols = user_symbols[chat_id] if user_symbols and chat_id in user_symbols else set()
+    image_paths = [image_cache[sym] for sym in symbols if image_cache and sym in image_cache]
+    symbol_list = [sym for sym in symbols if image_cache and sym in image_cache]
     if image_paths:
         send_telegram_media_group(image_paths, symbol_list, chat_id)
 
@@ -753,13 +709,119 @@ def get_all_user_ids():
     except Exception:
         return []
 
+def technical_analysis_report_batch(chat_id_any):
+    import html
+    symbols = ["BTCUSDT", "ETHUSDT", "SOLUSDT"]
+    intervals = ["1h", "4h", "1d"]
+    results = []
+    for symbol in symbols:
+        per_interval_metrics = []
+        for interval in intervals:
+            try:
+                df = get_binance_klines(chat_id_any,symbol=symbol, interval=interval)
+                closes = df['close']
+                rsi = calc_rsi(closes)
+                ema = calc_ema(closes)
+                macd, macd_signal, macd_hist = calc_macd(closes)
+                boll_upper, boll_lower, boll_mid = calc_bollinger(closes)
+                closes_list = closes.tolist()
+                per_interval_metrics.append(
+                    f"<b>{interval}</b>: Fiyat: {round(closes_list[-1],2)}, RSI: {rsi}, EMA: {ema}, MACD: {macd}, Sinyal: {macd_signal}, Bollinger(üst/alt/orta): {boll_upper}/{boll_lower}/{boll_mid}"
+                )
+            except Exception as e:
+                per_interval_metrics.append(f"{interval}: HATA: {e}")
+        prompt = (
+            f"Aşağıda {symbol} için 1 saatlik, 4 saatlik ve günlük teknik veriler listelenmiştir:\n" +
+            "\n".join(per_interval_metrics) +
+            "\n\nYalnızca bu verileri göz önüne alarak genel piyasa trendini ve olası yönü TEK CÜMLEYLE teknik analiz uzmanı gibi özetle.\n" +
+            "Net ve baskın bir sinyal varsa büyük harfle ve emojiyle (✅ AL / ❌ SAT / 🟡 BEKLE) yaz, ardından bir iki cümle teknik kısa sebep belirt, uzatma!"
+        )
+        response = client.chat.completions.create(
+            model="gpt-4o",
+            messages=[
+                {"role": "system", "content": "Sen bir kripto para teknik analiz uzmanısın."},
+                {"role": "user", "content": prompt}
+            ]
+        )
+        analysis = response.choices[0].message.content.strip()
+        analysis = html.escape(analysis)
+        if analysis.upper().startswith("AL"):
+            analysis = f"✅ <b>AL</b> {analysis[2:].strip()}"
+        elif analysis.upper().startswith("SAT"):
+            analysis = f"❌ <b>SAT</b> {analysis[2:].strip()}"
+        elif analysis.upper().startswith("BEKLE"):
+            analysis = f"🟡 <b>BEKLE</b> {analysis[4:].strip()}"
+        results.append(f"\n<b>{symbol}</b> önerisi: {analysis}")
+    return "\n".join(results)
+
 def run_report_loop():
     while True:
+        # -- Haberleri ve özetini sadece 1 KEZ çek --
+        try:
+            sources = [
+                "https://cointelegraph.com/rss",
+                "https://www.coindesk.com/arc/outboundfeeds/rss/",
+                "https://www.newsbtc.com/feed/",
+                "https://cryptopanic.com/news/rss/"
+            ]
+            news = fetch_all_crypto_news(sources, limit=2)
+            news_summary_tr = summarize_and_translate_news(news)
+            news_summary_tr = news_summary_tr.strip()
+            news_block = (
+                "\n-------------------------------\n"
+                "🌎 <b>Son Kripto Haberler</b>:\n"
+                f"{news_summary_tr}"
+            )
+        except Exception as e:
+            news_block = f"\n-------------------------------\nKripto haberleri alınırken hata: {e}"
+
+        # ---- GRAFİK CACHE ----
+        image_cache = {}
+        all_symbols = set()
+        user_symbols = {}
+        for chat_id in get_all_user_ids():
+            symbols = set(["BTCUSDT", "ETHUSDT", "SOLUSDT"])
+            try:
+                spot_balances = get_spot_balances(chat_id)
+                if spot_balances:
+                    symbols.update([a['asset']+"USDT" for a in spot_balances if a['asset'] != "USDT"])
+            except Exception:
+                pass
+            try:
+                fut_pos = get_futures_position_table(chat_id)
+                if fut_pos:
+                    symbols.update([p['symbol'] for p in fut_pos])
+            except Exception:
+                pass
+            all_symbols.update(symbols)
+            user_symbols[chat_id] = symbols
+
+        for sym in all_symbols:
+            try:
+                img_path = plot_ohlc_ema_rsi_macd(list(get_all_user_ids())[0], sym)
+                image_cache[sym] = img_path
+            except Exception as e:
+                print(f"Görsel oluşturma hatası {sym}: {e}")
+
+        # --- TEKNİK ANALİZİ BİR KERE HESAPLA ---
+        anyone = None
+        for i in get_all_user_ids():
+            anyone = i
+            break
+        tech_cache = technical_analysis_report_batch(anyone) if anyone else ""
+
         for chat_id in get_all_user_ids():
             try:
-                report_to_telegram(chat_id)
+                report_to_telegram(chat_id, news_block=news_block, image_cache=image_cache, user_symbols=user_symbols, tech_cache=tech_cache)
             except Exception as e:
                 print(f"{chat_id} için rapor hatası:", e)
+
+        # -- Döngü sonunda temp dosyaları temizle --
+        for fp in set(image_cache.values()):
+            try:
+                os.remove(fp)
+            except Exception as ex:
+                print(f"{fp} silinemedi: {ex}")
         print("Bir sonraki rapor için 1 saat bekleniyor...")
         time.sleep(3600)
 if __name__ == "__main__":
