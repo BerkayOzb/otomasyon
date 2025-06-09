@@ -890,11 +890,89 @@ if __name__ == "__main__":
         await send_portfolio_curve_telegram(context, update.effective_chat.id)
 
     async def handle_rapor(update: Update, context: ContextTypes.DEFAULT_TYPE):
+        import sqlite3
+        from datetime import datetime
         chat_id = update.effective_chat.id
+        today = datetime.now().strftime('%Y-%m-%d')
+        limits = {"basic": 1, "normal": 3, "premium": 10}
+        try:
+            conn = sqlite3.connect('portfoy_logs.sqlite3')
+            c = conn.cursor()
+            c.execute('SELECT last_report_date, daily_report_count, user_type FROM user_api WHERE chat_id = ?', (chat_id,))
+            row = c.fetchone()
+            if row is None:
+                user_type = "normal"
+                max_rights = limits[user_type]
+                c.execute('INSERT INTO user_api (chat_id, last_report_date, daily_report_count, user_type) VALUES (?, ?, ?, ?)', (chat_id, today, 1, user_type))
+                conn.commit()
+                count = 1
+                last_date = today
+            else:
+                last_date, count, user_type = row
+                user_type = user_type or "normal"
+                max_rights = limits.get(user_type, 3)  # default normal hak
+                count = count or 0
+                # Tarih farklıysa sıfırla
+                if last_date != today:
+                    count = 0
+                if count >= max_rights:
+                    await update.message.reply_text(f"🚫 Günlük rapor limitinize ulaştınız. ({user_type} için {max_rights} hak) Yarın tekrar deneyin.")
+                    conn.close()
+                    return
+                # Kullanıcıya hak ver
+                count += 1
+                c.execute('UPDATE user_api SET last_report_date = ?, daily_report_count = ?, user_type = ? WHERE chat_id = ?', (today, count, user_type, chat_id))
+                conn.commit()
+            conn.close()
+        except Exception as e:
+            await update.message.reply_text(f"🚫 Rapor limiti kontrolünde hata: {e}")
+            return
         await update.message.reply_text("Raporunuz hazırlanıyor, lütfen bekleyin...")
         try:
+            # --- Haber, image ve symbol cache oluştur ---
+            sources = [
+                "https://cointelegraph.com/rss",
+                "https://www.coindesk.com/arc/outboundfeeds/rss/",
+                "https://www.newsbtc.com/feed/",
+                "https://cryptopanic.com/news/rss/"
+            ]
+            try:
+                news = fetch_all_crypto_news(sources, limit=2)
+                news_summary_tr = summarize_and_translate_news(news)
+                news_block = (
+                    "\n-------------------------------\n"
+                    "🌎 <b>Son Kripto Haberler</b>:\n"
+                    f"{news_summary_tr}"
+                )
+            except Exception as e:
+                news_block = f"\n-------------------------------\nKripto haberleri alınırken hata: {e}"
+
+            symbols = set(["BTCUSDT", "ETHUSDT", "SOLUSDT"])
+            try:
+                spot_balances = get_spot_balances(chat_id)
+                if spot_balances:
+                    symbols.update([a['asset']+"USDT" for a in spot_balances if a['asset'] != "USDT"])
+            except Exception:
+                pass
+            try:
+                fut_pos = get_futures_position_table(chat_id)
+                if fut_pos:
+                    symbols.update([p['symbol'] for p in fut_pos])
+            except Exception:
+                pass
+            user_symbols = {chat_id: symbols}
+            image_cache = {}
+            for sym in symbols:
+                try:
+                    img_path = plot_ohlc_ema_rsi_macd(chat_id, sym)
+                    image_cache[sym] = img_path
+                except Exception as e:
+                    print(f'Görsel oluşturma hatası {sym}: {e}')
+
+            tech_cache = technical_analysis_report_batch(chat_id)
+
             import threading
-            threading.Thread(target=report_to_telegram, args=(chat_id,)).start()
+            threading.Thread(target=report_to_telegram, args=(chat_id, news_block, image_cache, user_symbols, tech_cache)).start()
         except Exception as e:
             await update.message.reply_text(f"🚫 Rapor üretilemedi: {e}")
 
