@@ -36,9 +36,12 @@ def set_user_apikey(chat_id, api_key, api_secret):
         c = conn.cursor()
         c.execute("""
             CREATE TABLE IF NOT EXISTS user_api (
-                chat_id INTEGER PRIMARY KEY,
-                api_key TEXT,
-                api_secret TEXT
+                 chat_id INTEGER PRIMARY KEY,
+                 api_key TEXT,
+                 api_secret TEXT,
+                 last_report_date TEXT,
+                 daily_report_count INTEGER,
+                 user_type TEXT
             )
         """)
         c.execute("""
@@ -721,7 +724,10 @@ def get_all_user_ids():
             CREATE TABLE IF NOT EXISTS user_api (
                 chat_id INTEGER PRIMARY KEY,
                 api_key TEXT,
-                api_secret TEXT
+                api_secret TEXT,
+                last_report_date TEXT,
+                daily_report_count INTEGER,
+                user_type TEXT
             )
         ''')
         c.execute('SELECT chat_id FROM user_api')
@@ -889,6 +895,37 @@ if __name__ == "__main__":
     async def handle_pnl(update: Update, context: ContextTypes.DEFAULT_TYPE):
         await send_portfolio_curve_telegram(context, update.effective_chat.id)
 
+    async def handle_hesap(update: Update, context: ContextTypes.DEFAULT_TYPE):
+        import sqlite3
+        from datetime import datetime
+
+        chat_id = update.effective_chat.id
+        limits = {"basic": 1, "normal": 3, "premium": 10}
+        try:
+            conn = sqlite3.connect('portfoy_logs.sqlite3')
+            c = conn.cursor()
+            c.execute('SELECT last_report_date, daily_report_count, user_type FROM user_api WHERE chat_id = ?', (chat_id,))
+            row = c.fetchone()
+            if row is None:
+                await update.message.reply_text("Kayıtlı kullanıcı bulunamadı. Önce /apikey ile kayıt olun.")
+                return
+            last_date, count, user_type = row
+            user_type = user_type or "normal"
+            total_rights = limits.get(user_type, 3)
+            today = datetime.now().strftime('%Y-%m-%d')
+            # başka günden kalan sayaç varsa sıfır kabul et
+            if last_date != today:
+                used = 0
+            else:
+                used = count or 0
+            kalan_hak = max(0, total_rights - used)
+            msg = (f"👤 Kullanıcı Tipi: <b>{user_type.upper()}</b>\n"
+                f"Günlük Rapor Hakkı: <b>{total_rights}</b>\n"
+                f"Kalan Hak: <b>{kalan_hak}</b>")
+            await update.message.reply_text(msg, parse_mode="HTML")
+        except Exception as e:
+            await update.message.reply_text(f"Hesap bilgisi alınamadı: {e}")
+
     async def handle_rapor(update: Update, context: ContextTypes.DEFAULT_TYPE):
         import sqlite3
         from datetime import datetime
@@ -983,5 +1020,6 @@ if __name__ == "__main__":
     app.add_handler(CommandHandler("rapor", handle_rapor))
     app.add_handler(CommandHandler("apikey", handle_apikey))
     app.add_handler(CommandHandler("pnl", handle_pnl))
+    app.add_handler(CommandHandler("hesap", handle_hesap))
     print("Telegram komut listener başlatıldı (örn. /pnl)")
     app.run_polling()
