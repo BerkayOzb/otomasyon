@@ -522,7 +522,7 @@ def ai_futures_advice(chat_id,fut_pos):
 Aşağıda vadeli (futures) Binance hesabımdaki açık pozisyonlar verilmiştir:
 {positions_text}
 
-Her pozisyonun teknik indikatörlerini de dikkate alarak teknik olarak kısaca değerlendir, tut/sat/kapalı önerini belirt. En sonda ise genel risk ve yönetim önerisini yalnızca 2-3 cümleyle, tek paragraf halinde özetle.
+Her pozisyonun teknik indikatörlerini de dikkate alarak teknik olarak, pozisyon short ise ona göre long ise ona göre kısaca değerlendir, tut/sat/kapalı önerini belirt. En sonda ise genel risk ve yönetim önerisini yalnızca 2-3 cümleyle, tek paragraf halinde özetle.
 Kesinlikle başlık, maddeleme, paragraf veya kategori ekleme. Sadece kısa ve bütünleşik bir teknik özet ve öneri ver.
 """
     response = client.chat.completions.create(
